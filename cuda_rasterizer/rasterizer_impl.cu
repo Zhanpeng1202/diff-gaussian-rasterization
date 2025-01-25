@@ -154,6 +154,7 @@ void CudaRasterizer::Rasterizer::markVisible(
 
 CudaRasterizer::GeometryState CudaRasterizer::GeometryState::fromChunk(char*& chunk, size_t P)
 {
+	// I think we are oding here is to assign the address for return value
 	GeometryState geom;
 	obtain(chunk, geom.depths, P, 128);
 	obtain(chunk, geom.clamped, P * 3, 128);
@@ -195,6 +196,11 @@ CudaRasterizer::BinningState CudaRasterizer::BinningState::fromChunk(char*& chun
 
 // Forward rendering procedure for differentiable rasterization
 // of Gaussians.
+
+// TODO: Why we can do not declare geometryBuffer?
+// I undestand now, std::function mean the type 
+// we are passing a function as a parameter
+
 int CudaRasterizer::Rasterizer::forward(
 	std::function<char* (size_t)> geometryBuffer,
 	std::function<char* (size_t)> binningBuffer,
@@ -222,6 +228,10 @@ int CudaRasterizer::Rasterizer::forward(
 	const float focal_y = height / (2.0f * tan_fovy);
 	const float focal_x = width / (2.0f * tan_fovx);
 
+
+	// What required do is 
+	// - assign Geometry, Image, Binning the chunk
+	// - get the size, but I do not understand the grammar here 
 	size_t chunk_size = required<GeometryState>(P);
 	char* chunkptr = geometryBuffer(chunk_size);
 	GeometryState geomState = GeometryState::fromChunk(chunkptr, P);
@@ -230,6 +240,12 @@ int CudaRasterizer::Rasterizer::forward(
 	{
 		radii = geomState.internal_radii;
 	}
+
+	// So it is the struture of GPU
+	// grid block thread
+	// we are splitting the image into 16 * 16 tiles
+
+	// TODO: Why the Z dimension is 1 for grid and block?
 
 	dim3 tile_grid((width + BLOCK_X - 1) / BLOCK_X, (height + BLOCK_Y - 1) / BLOCK_Y, 1);
 	dim3 block(BLOCK_X, BLOCK_Y, 1);
@@ -274,7 +290,11 @@ int CudaRasterizer::Rasterizer::forward(
 
 	// Compute prefix sum over full list of touched tile counts by Gaussians
 	// E.g., [2, 3, 0, 2, 1] -> [2, 5, 5, 7, 8]
-	CHECK_CUDA(cub::DeviceScan::InclusiveSum(geomState.scanning_space, geomState.scan_size, geomState.tiles_touched, geomState.point_offsets, P), debug)
+	// TODO: Why we need to do this?
+	CHECK_CUDA(cub::DeviceScan::InclusiveSum(geomState.scanning_space,
+											 geomState.scan_size,
+											 geomState.tiles_touched,
+											 geomState.point_offsets, P), debug)
 
 	// Retrieve total number of Gaussian instances to launch and resize aux buffers
 	int num_rendered;
@@ -300,6 +320,10 @@ int CudaRasterizer::Rasterizer::forward(
 	int bit = getHigherMsb(tile_grid.x * tile_grid.y);
 
 	// Sort complete list of (duplicated) Gaussian indices by keys
+	// parameter:
+	// - size 
+	// - key in, value in 
+	// - key out, value out
 	CHECK_CUDA(cub::DeviceRadixSort::SortPairs(
 		binningState.list_sorting_space,
 		binningState.sorting_size,

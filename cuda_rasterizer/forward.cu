@@ -179,6 +179,7 @@ __global__ void preprocessCUDA(int P, int D, int M,
 	uint32_t* tiles_touched,
 	bool prefiltered)
 {
+	// TODO: Does it mean idx is always larger that number of gaussains?
 	auto idx = cg::this_grid().thread_rank();
 	if (idx >= P)
 		return;
