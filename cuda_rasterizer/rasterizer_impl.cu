@@ -136,8 +136,8 @@ bilateralFiltering(
 	int pixs = BLOCK_SIZE;
 
 	__shared__ glm::vec3    sorted_means[BLOCK_SIZE];
-	__shared__ glm::vec3 sorted_scales[BLOCK_SIZE];
-	__shared__ glm::vec4 sorted_rotations[BLOCK_SIZE];
+	__shared__ glm::vec3    sorted_scales[BLOCK_SIZE];
+	__shared__ glm::vec4    sorted_rotations[BLOCK_SIZE];
 
 	__shared__ glm::vec3    sorted_grad_means[BLOCK_SIZE];
 	__shared__ glm::vec3 	sorted_grad_scales[BLOCK_SIZE];
@@ -145,6 +145,7 @@ bilateralFiltering(
 
 
 	if (idx >= pixs){return;}
+	if (idx + range.x>=range.y){return;}
 
 	int offset = point_list[range.x + idx];
 
@@ -173,14 +174,15 @@ bilateralFiltering(
 	glm::vec3 filterred_scale_grad = glm::vec3(0.0f) + scale_grad;
 	glm::vec4 filterred_rot_grad   = glm::vec4(0.0f) + rot_grad;
 
+
 	float eps = 1e-10;
-	float sigma = 2e-7;
+	float sigma = 2e-4;
 
 	float w_mean_sum = 0.0f;
 	float w_scale_sum = 0.0f;
 	float w_rot_sum = 0.0f;
 
-	for(int i=-4; i++; i<=4){
+	for(int i=-4; i<=4; i++){
 		if(idx+i < 0 || idx+i >= pixs){continue;}
 
 		glm:: vec3 mean_n_grad =  sorted_grad_means[idx+i];
@@ -208,18 +210,17 @@ bilateralFiltering(
 		filterred_rot_grad += w_rot * rot_n_grad;
 	}
 
-	filterred_mean_grad /= w_mean_sum;
-	filterred_scale_grad /= w_scale_sum;
-	filterred_rot_grad /= w_rot_sum;
+	float safeDenomScale  = max(w_scale_sum, 1e-8f);
 
-	// glm::vec3* dL_dmean3D,
-	// glm::vec3* dL_dscale,
-	// glm::vec4* dL_drot,
+	filterred_mean_grad /= (w_mean_sum+eps);
+	filterred_scale_grad /= (safeDenomScale+eps);
+	filterred_rot_grad /= (w_rot_sum+eps);
 
 
-	dL_dmean3D[offset] = filterred_mean_grad;
+	// dL_dmean3D[offset] = filterred_mean_grad;
 	dL_dscale[offset] = filterred_scale_grad;
-	dL_drot[offset] = filterred_rot_grad;
+	// we current do not consider the rotation since I have not found a good way to calculate the distance between two quaternions
+	// dL_drot[offset] = filterred_rot_grad;
 }
 
 
@@ -586,19 +587,4 @@ void CudaRasterizer::Rasterizer::backward(
 		(glm::vec4*) dL_drot,
 		binningState.point_list,
 		imgState.ranges);
-
-	//bilateralFiltering(
-	// const int P,
-	// const int horizontal_blocks,
-	// const glm::vec3*  means3D,
-	// const glm::vec3* scales,å
-	// const glm::vec4* rotations,
-	// glm::vec3* dL_dmean3D,
-	// glm::vec3* dL_dscale,
-	// glm::vec4* dL_drot,
-	// uint64_t* point_list,
-	// uint2* ranges)
-	
-
-
 }
