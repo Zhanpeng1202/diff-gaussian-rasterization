@@ -49,6 +49,8 @@ uint32_t getHigherMsb(uint32_t n)
 	return msb;
 }
 
+
+
 // Wrapper method to call auxiliary coarse frustum containment test.
 // Mark all Gaussians that pass it.
 __global__ void checkFrustum(int P,
@@ -109,6 +111,121 @@ __global__ void duplicateWithKeys(
 		}
 	}
 }
+
+
+// Per - tile bilateral filtering
+template <uint32_t CHANNELS>
+__global__ void __launch_bounds__(BLOCK_X * BLOCK_Y)
+bilateralFiltering(
+	const int P,
+	const uint32_t horizontal_blocks,
+	const glm::vec3*  means3D,
+	const glm::vec3* scales,
+	const glm::vec4* rotations,
+	glm::vec3* dL_dmean3D,
+	glm::vec3* dL_dscale,
+	glm::vec4* dL_drot,
+	uint32_t* point_list,
+	uint2* ranges)
+{
+	auto block = cg::this_thread_block();
+	const uint2 range = ranges[block.group_index().y * horizontal_blocks + block.group_index().x];
+
+	auto idx = block.thread_rank();
+
+	int pixs = BLOCK_SIZE;
+
+	__shared__ glm::vec3    sorted_means[BLOCK_SIZE];
+	__shared__ glm::vec3 sorted_scales[BLOCK_SIZE];
+	__shared__ glm::vec4 sorted_rotations[BLOCK_SIZE];
+
+	__shared__ glm::vec3    sorted_grad_means[BLOCK_SIZE];
+	__shared__ glm::vec3 	sorted_grad_scales[BLOCK_SIZE];
+	__shared__ glm::vec4 	sorted_grad_rotations[BLOCK_SIZE];
+
+
+	if (idx >= pixs){return;}
+
+	int offset = point_list[range.x + idx];
+
+	sorted_means[idx] = means3D[offset];
+	sorted_scales[idx] = scales[offset];
+	sorted_rotations[idx] = rotations[offset];
+
+	sorted_grad_means[idx] = dL_dmean3D[offset];
+	sorted_grad_scales[idx] = dL_dscale[offset];
+	sorted_grad_rotations[idx] = dL_drot[offset];
+
+	__syncthreads();
+
+	// each thread will process this exact gradient  
+
+	glm:: vec3 mean_grad  = sorted_grad_means[idx];
+	glm:: vec3 scale_grad = sorted_grad_scales[idx];
+	glm:: vec4 rot_grad   = sorted_grad_rotations[idx];
+
+	glm:: vec3 mean_param = sorted_means[idx];
+	glm:: vec4 rot_param = sorted_rotations[idx];
+	glm:: vec3 scale_param = sorted_scales[idx];
+
+
+	glm::vec3 filterred_mean_grad  = glm::vec3(0.0f) + mean_grad;
+	glm::vec3 filterred_scale_grad = glm::vec3(0.0f) + scale_grad;
+	glm::vec4 filterred_rot_grad   = glm::vec4(0.0f) + rot_grad;
+
+	float eps = 1e-10;
+	float sigma = 2e-7;
+
+	float w_mean_sum = 0.0f;
+	float w_scale_sum = 0.0f;
+	float w_rot_sum = 0.0f;
+
+	for(int i=-4; i++; i<=4){
+		if(idx+i < 0 || idx+i >= pixs){continue;}
+
+		glm:: vec3 mean_n_grad =  sorted_grad_means[idx+i];
+		glm:: vec3 scale_n_grad = sorted_grad_scales[idx+i];
+		glm:: vec4 rot_n_grad = sorted_grad_rotations[idx+i];
+
+		glm::vec3 mean_n_param = sorted_means[idx+i];
+		glm::vec4 rot_n_param = sorted_rotations[idx+i];
+		glm::vec3 scale_n_param = sorted_scales[idx+i];
+
+		float mean_param_dist = glm::distance(mean_param, mean_n_param);
+		float scale_param_dist = glm::distance(scale_param, scale_n_param);
+		float rot_param_dist = glm::distance(rot_param, rot_n_param);
+
+		float w_mean = exp(-mean_param_dist/(sigma+eps));
+		float w_scale = exp(-scale_param_dist/(sigma+eps));
+		float w_rot = exp(-rot_param_dist/(sigma+eps));
+
+		w_mean_sum += w_mean;
+		w_scale_sum += w_scale;
+		w_rot_sum += w_rot;
+
+		filterred_mean_grad += w_mean * mean_n_grad;
+		filterred_scale_grad += w_scale * scale_n_grad;
+		filterred_rot_grad += w_rot * rot_n_grad;
+	}
+
+	filterred_mean_grad /= w_mean_sum;
+	filterred_scale_grad /= w_scale_sum;
+	filterred_rot_grad /= w_rot_sum;
+
+	// glm::vec3* dL_dmean3D,
+	// glm::vec3* dL_dscale,
+	// glm::vec4* dL_drot,
+
+
+	dL_dmean3D[offset] = filterred_mean_grad;
+	dL_dscale[offset] = filterred_scale_grad;
+	dL_drot[offset] = filterred_rot_grad;
+}
+
+
+
+
+
 
 // Check keys to see if it is at the start/end of one tile's range in 
 // the full sorted list. If yes, write start/end of this tile. 
@@ -455,4 +572,33 @@ void CudaRasterizer::Rasterizer::backward(
 		dL_dsh,
 		(glm::vec3*)dL_dscale,
 		(glm::vec4*)dL_drot), debug)
+
+	const uint32_t horizontal_blocks = (width + BLOCK_X - 1) / BLOCK_X;
+
+	bilateralFiltering<NUM_CHANNELS> << <tile_grid, block >> > (
+		P,
+		horizontal_blocks,
+		(glm::vec3*) means3D,
+		(glm::vec3*) scales,
+		(glm::vec4*) rotations,
+		(glm::vec3*) dL_dmean3D,
+		(glm::vec3*) dL_dscale,
+		(glm::vec4*) dL_drot,
+		binningState.point_list,
+		imgState.ranges);
+
+	//bilateralFiltering(
+	// const int P,
+	// const int horizontal_blocks,
+	// const glm::vec3*  means3D,
+	// const glm::vec3* scales,å
+	// const glm::vec4* rotations,
+	// glm::vec3* dL_dmean3D,
+	// glm::vec3* dL_dscale,
+	// glm::vec4* dL_drot,
+	// uint64_t* point_list,
+	// uint2* ranges)
+	
+
+
 }
