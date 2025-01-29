@@ -81,7 +81,40 @@ namespace CudaRasterizer
 			float* dL_dsh,
 			float* dL_dscale,
 			float* dL_drot,
+			bool debug,
+			float sigma_s, float sigma_d);
+		
+		static void backward(
+			const int P, int D, int M, int R,
+			const float* background,
+			const int width, int height,
+			const float* means3D,
+			const float* shs,
+			const float* colors_precomp,
+			const float* scales,
+			const float scale_modifier,
+			const float* rotations,
+			const float* cov3D_precomp,
+			const float* viewmatrix,
+			const float* projmatrix,
+			const float* campos,
+			const float tan_fovx, float tan_fovy,
+			const int* radii,
+			char* geom_buffer,
+			char* binning_buffer,
+			char* image_buffer,
+			const float* dL_dpix,
+			float* dL_dmean2D,
+			float* dL_dconic,
+			float* dL_dopacity,
+			float* dL_dcolor,
+			float* dL_dmean3D,
+			float* dL_dcov3D,
+			float* dL_dsh,
+			float* dL_dscale,
+			float* dL_drot,
 			bool debug);
+			
 	};
 };
 

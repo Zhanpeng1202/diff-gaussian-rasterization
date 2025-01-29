@@ -127,7 +127,7 @@ bilateralFiltering(
 	glm::vec4* dL_drot,
 	uint32_t* point_list,
 	uint2* ranges,
-	float sigma_s, float sigma_d)
+	float sigma_s=5e-1, float sigma_d=5e-3)
 {
 	auto block = cg::this_thread_block();
 	const uint2 range = ranges[block.group_index().y * horizontal_blocks + block.group_index().x];
@@ -598,4 +598,104 @@ void CudaRasterizer::Rasterizer::backward(
 		binningState.point_list,
 		imgState.ranges,
 		sigma_s, sigma_d);
+}
+
+
+void CudaRasterizer::Rasterizer::backward(
+	const int P, int D, int M, int R,
+	const float* background,
+	const int width, int height,
+	const float* means3D,
+	const float* shs,
+	const float* colors_precomp,
+	const float* scales,
+	const float scale_modifier,
+	const float* rotations,
+	const float* cov3D_precomp,
+	const float* viewmatrix,
+	const float* projmatrix,
+	const float* campos,
+	const float tan_fovx, float tan_fovy,
+	const int* radii,
+	char* geom_buffer,
+	char* binning_buffer,
+	char* img_buffer,
+	const float* dL_dpix,
+	float* dL_dmean2D,
+	float* dL_dconic,
+	float* dL_dopacity,
+	float* dL_dcolor,
+	float* dL_dmean3D,
+	float* dL_dcov3D,
+	float* dL_dsh,
+	float* dL_dscale,
+	float* dL_drot,
+	bool debug)
+{
+	GeometryState geomState = GeometryState::fromChunk(geom_buffer, P);
+	BinningState binningState = BinningState::fromChunk(binning_buffer, R);
+	ImageState imgState = ImageState::fromChunk(img_buffer, width * height);
+
+	if (radii == nullptr)
+	{
+		radii = geomState.internal_radii;
+	}
+
+	const float focal_y = height / (2.0f * tan_fovy);
+	const float focal_x = width / (2.0f * tan_fovx);
+
+	const dim3 tile_grid((width + BLOCK_X - 1) / BLOCK_X, (height + BLOCK_Y - 1) / BLOCK_Y, 1);
+	const dim3 block(BLOCK_X, BLOCK_Y, 1);
+
+	// Compute loss gradients w.r.t. 2D mean position, conic matrix,
+	// opacity and RGB of Gaussians from per-pixel loss gradients.
+	// If we were given precomputed colors and not SHs, use them.
+	const float* color_ptr = (colors_precomp != nullptr) ? colors_precomp : geomState.rgb;
+	CHECK_CUDA(BACKWARD::render(
+		tile_grid,
+		block,
+		imgState.ranges,
+		binningState.point_list,
+		width, height,
+		background,
+		geomState.means2D,
+		geomState.conic_opacity,
+		color_ptr,
+		imgState.accum_alpha,
+		imgState.n_contrib,
+		dL_dpix,
+		(float3*)dL_dmean2D,
+		(float4*)dL_dconic,
+		dL_dopacity,
+		dL_dcolor), debug)
+
+	// Take care of the rest of preprocessing. Was the precomputed covariance
+	// given to us or a scales/rot pair? If precomputed, pass that. If not,
+	// use the one we computed ourselves.
+	const float* cov3D_ptr = (cov3D_precomp != nullptr) ? cov3D_precomp : geomState.cov3D;
+	CHECK_CUDA(BACKWARD::preprocess(P, D, M,
+		(float3*)means3D,
+		radii,
+		shs,
+		geomState.clamped,
+		(glm::vec3*)scales,
+		(glm::vec4*)rotations,
+		scale_modifier,
+		cov3D_ptr,
+		viewmatrix,
+		projmatrix,
+		focal_x, focal_y,
+		tan_fovx, tan_fovy,
+		(glm::vec3*)campos,
+		(float3*)dL_dmean2D,
+		dL_dconic,
+		(glm::vec3*)dL_dmean3D,
+		dL_dcolor,
+		dL_dcov3D,
+		dL_dsh,
+		(glm::vec3*)dL_dscale,
+		(glm::vec4*)dL_drot), debug)
+
+	const uint32_t horizontal_blocks = (width + BLOCK_X - 1) / BLOCK_X;
+
 }
