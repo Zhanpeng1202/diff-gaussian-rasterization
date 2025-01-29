@@ -126,7 +126,8 @@ bilateralFiltering(
 	glm::vec3* dL_dscale,
 	glm::vec4* dL_drot,
 	uint32_t* point_list,
-	uint2* ranges)
+	uint2* ranges,
+	float sigma_s, float sigma_d)
 {
 	auto block = cg::this_thread_block();
 	const uint2 range = ranges[block.group_index().y * horizontal_blocks + block.group_index().x];
@@ -157,7 +158,7 @@ bilateralFiltering(
 	sorted_grad_scales[idx] = dL_dscale[offset];
 	sorted_grad_rotations[idx] = dL_drot[offset];
 
-	__syncthreads();
+	block.sync();
 
 	// each thread will process this exact gradient  
 
@@ -165,8 +166,8 @@ bilateralFiltering(
 	glm:: vec3 scale_grad = sorted_grad_scales[idx];
 	glm:: vec4 rot_grad   = sorted_grad_rotations[idx];
 
-	glm:: vec3 mean_param = sorted_means[idx];
-	glm:: vec4 rot_param = sorted_rotations[idx];
+	glm:: vec3 mean_param  = sorted_means[idx];
+	glm:: vec4 rot_param   = sorted_rotations[idx];
 	glm:: vec3 scale_param = sorted_scales[idx];
 
 
@@ -176,14 +177,16 @@ bilateralFiltering(
 
 
 	float eps = 1e-10;
-	float sigma = 2e-4;
+	// float sigma_d = 5e-3;
+	// float sigma_s = 5e-1;
 
-	float w_mean_sum = 0.0f;
-	float w_scale_sum = 0.0f;
-	float w_rot_sum = 0.0f;
+	float w_mean_sum = 1.0f;
+	float w_scale_sum = 1.0f;
+	float w_rot_sum = 1.0f;
 
-	for(int i=-4; i<=4; i++){
-		if(idx+i < 0 || idx+i >= pixs){continue;}
+	for(int i=-4; i <=4; i++){
+		if(idx+i < 0 || idx+i >= BLOCK_SIZE){continue;}
+		// if(i==0){continue;}
 
 		glm:: vec3 mean_n_grad =  sorted_grad_means[idx+i];
 		glm:: vec3 scale_n_grad = sorted_grad_scales[idx+i];
@@ -197,18 +200,25 @@ bilateralFiltering(
 		float scale_param_dist = glm::distance(scale_param, scale_n_param);
 		float rot_param_dist = glm::distance(rot_param, rot_n_param);
 
-		float w_mean = exp(-mean_param_dist/(sigma+eps));
-		float w_scale = exp(-scale_param_dist/(sigma+eps));
-		float w_rot = exp(-rot_param_dist/(sigma+eps));
+		float feat_w_mean = exp(-mean_param_dist/(sigma_s+eps));
+		float feat_w_scale = exp(-scale_param_dist/(sigma_d+eps));
+		float feat_w_rot = exp(-rot_param_dist/(sigma_d+eps));
 
-		w_mean_sum += w_mean;
-		w_scale_sum += w_scale;
-		w_rot_sum += w_rot;
+		feat_w_scale *= feat_w_mean;
 
-		filterred_mean_grad += w_mean * mean_n_grad;
-		filterred_scale_grad += w_scale * scale_n_grad;
-		filterred_rot_grad += w_rot * rot_n_grad;
+		w_mean_sum += feat_w_mean;
+		w_scale_sum += feat_w_scale;
+		w_rot_sum += feat_w_mean;
+
+		filterred_mean_grad  += feat_w_mean * mean_n_grad;
+		filterred_scale_grad += feat_w_scale  * scale_n_grad;
+		filterred_rot_grad   += feat_w_rot  * rot_n_grad;
 	}
+
+
+
+
+
 
 	float safeDenomScale  = max(w_scale_sum, 1e-8f);
 
@@ -219,7 +229,6 @@ bilateralFiltering(
 
 	// dL_dmean3D[offset] = filterred_mean_grad;
 	dL_dscale[offset] = filterred_scale_grad;
-	// we current do not consider the rotation since I have not found a good way to calculate the distance between two quaternions
 	// dL_drot[offset] = filterred_rot_grad;
 }
 
@@ -508,7 +517,8 @@ void CudaRasterizer::Rasterizer::backward(
 	float* dL_dsh,
 	float* dL_dscale,
 	float* dL_drot,
-	bool debug)
+	bool debug,
+	float sigma_s, float sigma_d)
 {
 	GeometryState geomState = GeometryState::fromChunk(geom_buffer, P);
 	BinningState binningState = BinningState::fromChunk(binning_buffer, R);
@@ -586,5 +596,6 @@ void CudaRasterizer::Rasterizer::backward(
 		(glm::vec3*) dL_dscale,
 		(glm::vec4*) dL_drot,
 		binningState.point_list,
-		imgState.ranges);
+		imgState.ranges,
+		sigma_s, sigma_d);
 }
