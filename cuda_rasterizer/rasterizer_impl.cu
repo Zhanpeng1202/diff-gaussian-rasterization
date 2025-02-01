@@ -235,6 +235,27 @@ bilateralFiltering(
 
 
 
+__global__ void position_compensate(
+	// Compensate for SGD. So we need to multiply by z^2
+	const int P,
+	float* depth,
+	float3* gradient_position){
+	auto idx = cg::this_grid().thread_rank();
+	if (idx >= P)
+		return;
+
+	float z = depth[idx];
+	float3 grad = gradient_position[idx];
+	grad.z = grad.z * z * z;
+	grad.x = grad.x * z * z;
+	grad.y = grad.y * z * z;
+	gradient_position[idx] = grad;
+}
+
+
+
+
+
 
 
 // Check keys to see if it is at the start/end of one tile's range in 
@@ -584,20 +605,30 @@ void CudaRasterizer::Rasterizer::backward(
 		(glm::vec3*)dL_dscale,
 		(glm::vec4*)dL_drot), debug)
 
-	const uint32_t horizontal_blocks = (width + BLOCK_X - 1) / BLOCK_X;
-
-	bilateralFiltering<NUM_CHANNELS> << <tile_grid, block >> > (
+	position_compensate << <(P + 255) / 256, 256 >> > (
 		P,
-		horizontal_blocks,
-		(glm::vec3*) means3D,
-		(glm::vec3*) scales,
-		(glm::vec4*) rotations,
-		(glm::vec3*) dL_dmean3D,
-		(glm::vec3*) dL_dscale,
-		(glm::vec4*) dL_drot,
-		binningState.point_list,
-		imgState.ranges,
-		sigma_s, sigma_d);
+		geomState.depths,
+		(float3*) dL_dmean3D);
+	
+	// const uint32_t horizontal_blocks = (width + BLOCK_X - 1) / BLOCK_X;
+
+	// bilateralFiltering<NUM_CHANNELS> << <tile_grid, block >> > (
+	// 	P,
+	// 	horizontal_blocks,
+	// 	(glm::vec3*) means3D,
+	// 	(glm::vec3*) scales,
+	// 	(glm::vec4*) rotations,
+	// 	(glm::vec3*) dL_dmean3D,
+	// 	(glm::vec3*) dL_dscale,
+	// 	(glm::vec4*) dL_drot,
+	// 	binningState.point_list,
+	// 	imgState.ranges,
+	// 	sigma_s, sigma_d);
+
+
+
+
+
 }
 
 
