@@ -122,9 +122,11 @@ bilateralFiltering(
 	const glm::vec3*  means3D,
 	const glm::vec3* scales,
 	const glm::vec4* rotations,
+	const float4* conic_opacity,
 	glm::vec3* dL_dmean3D,
 	glm::vec3* dL_dscale,
 	glm::vec4* dL_drot,
+	float* dL_dopacity,
 	uint32_t* point_list,
 	uint2* ranges,
 	float sigma_s=5e-1, float sigma_d=5e-3)
@@ -134,102 +136,117 @@ bilateralFiltering(
 
 	auto idx = block.thread_rank();
 
-	int pixs = BLOCK_SIZE;
 
 	__shared__ glm::vec3    sorted_means[BLOCK_SIZE];
 	__shared__ glm::vec3    sorted_scales[BLOCK_SIZE];
 	__shared__ glm::vec4    sorted_rotations[BLOCK_SIZE];
+	__shared__ float        sorted_opacity[BLOCK_SIZE];
 
 	__shared__ glm::vec3    sorted_grad_means[BLOCK_SIZE];
 	__shared__ glm::vec3 	sorted_grad_scales[BLOCK_SIZE];
 	__shared__ glm::vec4 	sorted_grad_rotations[BLOCK_SIZE];
+	__shared__ float 		sorted_grad_opacity[BLOCK_SIZE];
 
 
-	if (idx >= pixs){return;}
-	if (idx + range.x>=range.y){return;}
+	bool valid = idx < BLOCK_SIZE && idx + range.x < range.y;
+	int offset = 0;
+	if(valid){
+		offset = point_list[range.x + idx];
 
-	int offset = point_list[range.x + idx];
-
-	sorted_means[idx] = means3D[offset];
-	sorted_scales[idx] = scales[offset];
-	sorted_rotations[idx] = rotations[offset];
-
-	sorted_grad_means[idx] = dL_dmean3D[offset];
-	sorted_grad_scales[idx] = dL_dscale[offset];
-	sorted_grad_rotations[idx] = dL_drot[offset];
-
+		sorted_means[idx]     = means3D[offset];
+		sorted_scales[idx]    = scales[offset];
+		sorted_rotations[idx] = rotations[offset];
+		sorted_opacity[idx]   = conic_opacity[offset].w;
+	
+		sorted_grad_means[idx]     = dL_dmean3D[offset];
+		sorted_grad_scales[idx]    = dL_dscale[offset];
+		sorted_grad_rotations[idx] = dL_drot[offset];
+		sorted_grad_opacity[idx]   = dL_dopacity[offset];
+	}
 	block.sync();
+
+	// return after block, hopefully it woudl solve the problem
+	if(!valid){return;}
 
 	// each thread will process this exact gradient  
 
 	glm:: vec3 mean_grad  = sorted_grad_means[idx];
 	glm:: vec3 scale_grad = sorted_grad_scales[idx];
 	glm:: vec4 rot_grad   = sorted_grad_rotations[idx];
+	float opacity_grad    = sorted_grad_opacity[idx];
 
 	glm:: vec3 mean_param  = sorted_means[idx];
 	glm:: vec4 rot_param   = sorted_rotations[idx];
 	glm:: vec3 scale_param = sorted_scales[idx];
+	float opacity_param    = sorted_opacity[idx];
+
 
 
 	glm::vec3 filterred_mean_grad  = glm::vec3(0.0f) + mean_grad;
 	glm::vec3 filterred_scale_grad = glm::vec3(0.0f) + scale_grad;
 	glm::vec4 filterred_rot_grad   = glm::vec4(0.0f) + rot_grad;
+	float filterred_opacity_grad   = 0.0f + opacity_grad;
 
 
 	float eps = 1e-10;
-	// float sigma_d = 5e-3;
-	// float sigma_s = 5e-1;
-
 	float w_mean_sum = 1.0f;
 	float w_scale_sum = 1.0f;
 	float w_rot_sum = 1.0f;
+	float w_opacity_sum = 1.0f;
 
-	for(int i=-4; i <=4; i++){
+	for(int i=-15; i <=15; i++){
 		if(idx+i < 0 || idx+i >= BLOCK_SIZE){continue;}
-		// if(i==0){continue;}
+		if(idx+i >= (range.y - range.x)){continue;}
+		if(i==0){continue;}
 
-		glm:: vec3 mean_n_grad =  sorted_grad_means[idx+i];
+		glm:: vec3 mean_n_grad  = sorted_grad_means[idx+i];
 		glm:: vec3 scale_n_grad = sorted_grad_scales[idx+i];
-		glm:: vec4 rot_n_grad = sorted_grad_rotations[idx+i];
+		glm:: vec4 rot_n_grad   = sorted_grad_rotations[idx+i];
+		float opacity_n_grad    = sorted_grad_opacity[idx+i];
 
 		glm::vec3 mean_n_param = sorted_means[idx+i];
 		glm::vec4 rot_n_param = sorted_rotations[idx+i];
 		glm::vec3 scale_n_param = sorted_scales[idx+i];
+		float opacity_n_param = sorted_opacity[idx+i];
 
-		float mean_param_dist = glm::distance(mean_param, mean_n_param);
+		float mean_param_dist  = glm::distance(mean_param, mean_n_param);
 		float scale_param_dist = glm::distance(scale_param, scale_n_param);
-		float rot_param_dist = glm::distance(rot_param, rot_n_param);
+		float rot_param_dist   = fabs(glm::dot(rot_param, rot_n_param));
+		float opacity_param_dist = fabs(opacity_param - opacity_n_param);
 
-		float feat_w_mean = exp(-mean_param_dist/(sigma_s+eps));
-		float feat_w_scale = exp(-scale_param_dist/(sigma_d+eps));
-		float feat_w_rot = exp(-rot_param_dist/(sigma_d+eps));
+		rot_param_dist = min(rot_param_dist, 0.99f);
+		rot_param_dist = acos(rot_param_dist);
 
-		feat_w_scale *= feat_w_mean;
 
-		w_mean_sum += feat_w_mean;
-		w_scale_sum += feat_w_scale;
-		w_rot_sum += feat_w_mean;
+		float feat_w_mean  = exp(-mean_param_dist/(sigma_s))+eps;
+		float feat_w_scale = exp(-scale_param_dist/(sigma_d))+eps;
+		float feat_w_rot   = exp(-rot_param_dist/(sigma_s))+eps;
+		float feat_w_opacity = exp(-opacity_param_dist/(sigma_d))+eps;
 
-		filterred_mean_grad  += feat_w_mean * mean_n_grad;
+		feat_w_scale   *= feat_w_mean;
+		feat_w_rot     *= feat_w_mean;
+		feat_w_opacity *= feat_w_mean;
+
+		w_scale_sum   += feat_w_scale;
+		w_rot_sum     += feat_w_rot ;
+		w_opacity_sum += feat_w_opacity;
+
 		filterred_scale_grad += feat_w_scale  * scale_n_grad;
 		filterred_rot_grad   += feat_w_rot  * rot_n_grad;
+		filterred_opacity_grad += feat_w_opacity * opacity_n_grad;
 	}
 
 
+	filterred_scale_grad /= (w_scale_sum+eps);
+	filterred_rot_grad   /= (w_rot_sum+eps);
+	filterred_opacity_grad /= (w_opacity_sum+eps);
 
 
-
-
-	float safeDenomScale  = max(w_scale_sum, 1e-8f);
-
-	filterred_mean_grad /= (w_mean_sum+eps);
-	filterred_scale_grad /= (safeDenomScale+eps);
-	filterred_rot_grad /= (w_rot_sum+eps);
-
-
-	// dL_dmean3D[offset] = filterred_mean_grad;
 	dL_dscale[offset] = filterred_scale_grad;
-	// dL_drot[offset] = filterred_rot_grad;
+	dL_drot[offset] = filterred_rot_grad;
+	dL_dopacity[offset] = filterred_opacity_grad;
+
+
 }
 
 
@@ -605,26 +622,31 @@ void CudaRasterizer::Rasterizer::backward(
 		(glm::vec3*)dL_dscale,
 		(glm::vec4*)dL_drot), debug)
 
+
+	
+	const uint32_t horizontal_blocks = (width + BLOCK_X - 1) / BLOCK_X;
+
 	position_compensate << <(P + 255) / 256, 256 >> > (
 		P,
 		geomState.depths,
 		(float3*) dL_dmean3D);
+
 	
-	// const uint32_t horizontal_blocks = (width + BLOCK_X - 1) / BLOCK_X;
-
-	// bilateralFiltering<NUM_CHANNELS> << <tile_grid, block >> > (
-	// 	P,
-	// 	horizontal_blocks,
-	// 	(glm::vec3*) means3D,
-	// 	(glm::vec3*) scales,
-	// 	(glm::vec4*) rotations,
-	// 	(glm::vec3*) dL_dmean3D,
-	// 	(glm::vec3*) dL_dscale,
-	// 	(glm::vec4*) dL_drot,
-	// 	binningState.point_list,
-	// 	imgState.ranges,
-	// 	sigma_s, sigma_d);
-
+	bilateralFiltering<NUM_CHANNELS> << <tile_grid, block >> > (
+		P,
+		horizontal_blocks,
+		(glm::vec3*) means3D,
+		(glm::vec3*) scales,
+		(glm::vec4*) rotations,
+		geomState.conic_opacity,
+		(glm::vec3*) dL_dmean3D,
+		(glm::vec3*) dL_dscale,
+		(glm::vec4*) dL_drot,
+		dL_dopacity,
+		binningState.point_list,
+		imgState.ranges,
+		sigma_s, sigma_d);
+	
 
 
 
