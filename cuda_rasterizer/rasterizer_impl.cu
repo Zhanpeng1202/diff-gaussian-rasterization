@@ -148,10 +148,10 @@ bilateralFiltering(
 	__shared__ float 		sorted_grad_opacity[BLOCK_SIZE];
 
 
-	bool valid = idx < BLOCK_SIZE && idx + range.x < range.y;
+	bool valid = idx < BLOCK_SIZE && (idx+BLOCK_SIZE + range.x) < range.y;
 	int offset = 0;
 	if(valid){
-		offset = point_list[range.x + idx];
+		offset = point_list[range.x + idx+BLOCK_SIZE];
 
 		sorted_means[idx]     = means3D[offset];
 		sorted_scales[idx]    = scales[offset];
@@ -196,7 +196,7 @@ bilateralFiltering(
 
 	for(int i=-15; i <=15; i++){
 		if(idx+i < 0 || idx+i >= BLOCK_SIZE){continue;}
-		if(idx+i >= (range.y - range.x)){continue;}
+		if(idx+i+BLOCK_SIZE >= (range.y - range.x)){continue;}
 		if(i==0){continue;}
 
 		glm:: vec3 mean_n_grad  = sorted_grad_means[idx+i];
@@ -236,16 +236,13 @@ bilateralFiltering(
 		filterred_opacity_grad += feat_w_opacity * opacity_n_grad;
 	}
 
-
 	filterred_scale_grad /= (w_scale_sum+eps);
 	filterred_rot_grad   /= (w_rot_sum+eps);
 	filterred_opacity_grad /= (w_opacity_sum+eps);
 
-
 	dL_dscale[offset] = filterred_scale_grad;
 	dL_drot[offset] = filterred_rot_grad;
 	dL_dopacity[offset] = filterred_opacity_grad;
-
 
 }
 
