@@ -246,9 +246,100 @@ bilateralFiltering(
 
 }
 
+__global__ void __launch_bounds__(BLOCK_X * BLOCK_Y)
+bilateralFilter_color(
+	const int P,
+	int M, // max_coeffs
+	const uint32_t horizontal_blocks,
+	const glm::vec3*  means3D,
+	glm::vec3* rgb,
+	glm::vec3* dL_dshs,
+	uint32_t* point_list,
+	uint2* ranges,
+	int start_sh,
+	int end_sh,
+	float sigma_s=5e-1, float sigma_d=5e-3)
+{
+	// Our GPU only allow 0xc0000 Shared per block
+	// change the code so that we only process sh in the selected range
+	// [start_sh, end_sh)
+	auto block = cg::this_thread_block();
+	const uint2 range = ranges[block.group_index().y * horizontal_blocks + block.group_index().x];
+	
+	auto idx = block.thread_rank();
+	__shared__ glm::vec3    sorted_means[BLOCK_SIZE];
+
+	__shared__ glm::vec3 	sorted_rgb[BLOCK_SIZE];
+	__shared__ glm::vec3 	sorted_grad_shs[BLOCK_SIZE*8];
+
+	bool valid = idx < BLOCK_SIZE && (idx+ range.x) < range.y;
+	int offset = 0;
+	if(valid){
+		offset                 = point_list[range.x + idx];
+		sorted_means[idx]      = means3D[offset];
+		sorted_rgb[idx]        = rgb[offset];
+		for(int i=start_sh; i<end_sh; i++){
+			sorted_grad_shs[idx*8+i%8] = dL_dshs[offset*M+i];
+		}
+	}
+	block.sync();
+
+	if(!valid){return;}
+
+	glm::vec3 mean_param = sorted_means[idx];
+	glm::vec3 rgb_param  = sorted_rgb[idx];
+	glm::vec3 filtered_list[8];
+	for(int i=start_sh; i<end_sh; i++){
+		int idx_remain = i%8;
+		filtered_list[idx_remain] = sorted_grad_shs[idx*8+idx_remain];
+
+	}
+
+	float weight_sum = 1.0f;
+	float eps = 1e-10;
+	// we set i ==0 to test is our code is correct
+	for(int i=7; i<=7; i++){
+		if(idx+i < 0 || idx+i >= BLOCK_SIZE){continue;}
+		if(idx+i+BLOCK_SIZE >= (range.y - range.x)){continue;}
+		if(i==0){continue;}
+
+		glm::vec3 mean_n_param = sorted_means[idx+i];
+		glm::vec3 rgb_n_param  = sorted_rgb[idx+i];
+		// use a maximum to initalize the list
+		glm::vec3 shs_n_grad_list[8];
+		for(int j=start_sh; j<end_sh; j++){
+			int idx_remain = j%8;
+			shs_n_grad_list[idx_remain] = sorted_grad_shs[(idx+i)*8+idx_remain];
+		}
+
+		float mean_param_dist  = glm::distance(mean_param, mean_n_param);
+		float rgb_param_dist   = glm::distance(rgb_param,  rgb_n_param);
+
+		float w_spatial  = exp(-mean_param_dist/(sigma_s))+eps;
+		float w_feature  = exp(-rgb_param_dist/(sigma_d))+eps;
+		w_feature *= w_spatial;
+		weight_sum += w_feature;
+		for(int j=start_sh; j<end_sh; j++){
+			int idx_remain = j%8;
+			filtered_list[idx_remain] += w_feature * shs_n_grad_list[idx_remain];
+		}
+	}
+
+	for(int i=start_sh; i<end_sh; i++){
+		int idx_remain = i%8;
+		filtered_list[idx_remain] /= (weight_sum+eps);
+	}
+
+	for(int i=start_sh; i<end_sh; i++){
+		int idx_remain = i%8;
+		dL_dshs[offset*M+i] = filtered_list[idx_remain];
+	}
+}
 
 
+// __device__ void bilateral_weight(){
 
+// }
 __global__ void position_compensate(
 	// Compensate for SGD. So we need to multiply by z^2
 	const int P,
@@ -265,10 +356,6 @@ __global__ void position_compensate(
 	grad.y = grad.y * z * z;
 	gradient_position[idx] = grad;
 }
-
-
-
-
 
 
 
@@ -629,20 +716,95 @@ void CudaRasterizer::Rasterizer::backward(
 		(float3*) dL_dmean3D);
 
 	
-	bilateralFiltering<NUM_CHANNELS> << <tile_grid, block >> > (
-		P,
-		horizontal_blocks,
-		(glm::vec3*) means3D,
-		(glm::vec3*) scales,
-		(glm::vec4*) rotations,
-		geomState.conic_opacity,
-		(glm::vec3*) dL_dmean3D,
-		(glm::vec3*) dL_dscale,
-		(glm::vec4*) dL_drot,
-		dL_dopacity,
-		binningState.point_list,
-		imgState.ranges,
-		sigma_s, sigma_d);
+	// bilateralFiltering<NUM_CHANNELS> << <tile_grid, block >> > (
+	// 	P,
+	// 	horizontal_blocks,
+	// 	(glm::vec3*) means3D,
+	// 	(glm::vec3*) scales,
+	// 	(glm::vec4*) rotations,
+	// 	geomState.conic_opacity,
+	// 	(glm::vec3*) dL_dmean3D,
+	// 	(glm::vec3*) dL_dscale,
+	// 	(glm::vec4*) dL_drot,
+	// 	dL_dopacity,
+	// 	binningState.point_list,
+	// 	imgState.ranges,
+	// 	sigma_s, sigma_d);
+
+	// if(D==0){
+	// 	bilateralFilter_color << <tile_grid, block >> > (
+	// 	P,
+	// 	M,
+	// 	horizontal_blocks,
+	// 	(glm::vec3*) means3D,
+	// 	(glm::vec3*) geomState.rgb,
+	// 	(glm::vec3*) dL_dsh,
+	// 	binningState.point_list,
+	// 	imgState.ranges,
+	// 	0, 1,
+	// 	sigma_s, sigma_d);
+	// }
+	// if(D==1){
+	// 	bilateralFilter_color << <tile_grid, block >> > (
+	// 	P,
+	// 	M,
+	// 	horizontal_blocks,
+	// 	(glm::vec3*) means3D,
+	// 	(glm::vec3*) geomState.rgb,
+	// 	(glm::vec3*) dL_dsh,
+	// 	binningState.point_list,
+	// 	imgState.ranges,
+	// 	0, 4,
+	// 	sigma_s, sigma_d);
+	// }
+	// if(D==2){
+	// 	bilateralFilter_color << <tile_grid, block >> > (
+	// 	P,
+	// 	M,
+	// 	horizontal_blocks,
+	// 	(glm::vec3*) means3D,
+	// 	(glm::vec3*) geomState.rgb,
+	// 	(glm::vec3*) dL_dsh,
+	// 	binningState.point_list,
+	// 	imgState.ranges,
+	// 	0, 8,
+	// 	sigma_s, sigma_d);
+	// 	bilateralFilter_color << <tile_grid, block >> > (
+	// 	P,
+	// 	M,
+	// 	horizontal_blocks,
+	// 	(glm::vec3*) means3D,
+	// 	(glm::vec3*) geomState.rgb,
+	// 	(glm::vec3*) dL_dsh,
+	// 	binningState.point_list,
+	// 	imgState.ranges,
+	// 	8, 9,
+	// 	sigma_s, sigma_d);
+	// }
+	// if(D==3){
+	// 	bilateralFilter_color << <tile_grid, block >> > (
+	// 	P,
+	// 	M,
+	// 	horizontal_blocks,
+	// 	(glm::vec3*) means3D,
+	// 	(glm::vec3*) geomState.rgb,
+	// 	(glm::vec3*) dL_dsh,
+	// 	binningState.point_list,
+	// 	imgState.ranges,
+	// 	0, 8,
+	// 	sigma_s, sigma_d);
+	// 	bilateralFilter_color << <tile_grid, block >> > (
+	// 	P,
+	// 	M,
+	// 	horizontal_blocks,
+	// 	(glm::vec3*) means3D,
+	// 	(glm::vec3*) geomState.rgb,
+	// 	(glm::vec3*) dL_dsh,
+	// 	binningState.point_list,
+	// 	imgState.ranges,
+	// 	8, 16,
+	// 	sigma_s, sigma_d);
+	// }
 	
 
 
